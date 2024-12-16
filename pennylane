@@ -1,0 +1,280 @@
+import pennylane as qml
+import numpy as np
+from typing import List, Tuple, Optional, Dict, Callable
+from sklearn.model_selection import GridSearchCV
+from sklearn.base import BaseEstimator
+import logging
+from enum import Enum
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class AnsatzType(Enum):
+    """Supported ansatz types"""
+    SIMPLE = "simple"
+    VQE = "vqe"
+    QNN = "qnn"
+
+class EncodingType(Enum):
+    """Supported encoding types"""
+    ANGLE = "angle"
+    AMPLITUDE = "amplitude"
+    BASIS = "basis"
+
+class QNLPCircuit(BaseEstimator):
+    def __init__(
+        self,
+        n_qubits: int = 4,
+        device: str = "default.qubit",
+        ansatz_type: AnsatzType = AnsatzType.QNN,
+        encoding_type: EncodingType = EncodingType.AMPLITUDE,
+        n_layers: int = 2,
+        learning_rate: float = 0.01,
+        convergence_threshold: float = 1e-6
+    ):
+        """
+        Enhanced QNLP circuit with multiple ansatz options and encoding strategies.
+        
+        Args:
+            n_qubits: Number of qubits
+            device: Quantum device to use
+            ansatz_type: Type of ansatz to use
+            encoding_type: Type of data encoding
+            n_layers: Number of ansatz layers
+            learning_rate: Learning rate for optimization
+            convergence_threshold: Convergence threshold
+        """
+        self.n_qubits = n_qubits
+        self.dev = qml.device(device, wires=n_qubits)
+        self.ansatz_type = ansatz_type
+        self.encoding_type = encoding_type
+        self.n_layers = n_layers
+        self.learning_rate = learning_rate
+        self.convergence_threshold = convergence_threshold
+        
+        # Initialize parameters based on ansatz type
+        self._init_parameters()
+
+    def _init_parameters(self):
+        """Initialize circuit parameters based on ansatz type"""
+        if self.ansatz_type == AnsatzType.SIMPLE:
+            self.n_params = self.n_qubits * 2
+        elif self.ansatz_type == AnsatzType.VQE:
+            self.n_params = self.n_qubits * self.n_layers * 3
+        else:  # QNN
+            self.n_params = self.n_qubits * self.n_layers * 4
+            
+        self.params = np.random.randn(self.n_params)
+
+    def _encode_data(self, data: np.ndarray) -> None:
+        """
+        Encode classical data into quantum states.
+        
+        Args:
+            data: Input data to encode
+        """
+        if self.encoding_type == EncodingType.ANGLE:
+            for i, value in enumerate(data[:self.n_qubits]):
+                qml.RY(value, wires=i)
+                
+        elif self.encoding_type == EncodingType.AMPLITUDE:
+            qml.QubitStateVector(data / np.linalg.norm(data), wires=range(self.n_qubits))
+            
+        else:  # BASIS encoding
+            for i, value in enumerate(data[:self.n_qubits]):
+                if value > 0.5:
+                    qml.PauliX(wires=i)
+
+    def _apply_ansatz(self, params: np.ndarray) -> None:
+        """
+        Apply the selected ansatz.
+        
+        Args:
+            params: Circuit parameters
+        """
+        param_idx = 0
+        
+        if self.ansatz_type == AnsatzType.SIMPLE:
+            for i in range(self.n_qubits):
+                qml.RX(params[param_idx], wires=i)
+                qml.RY(params[param_idx + 1], wires=i)
+                param_idx += 2
+                
+        elif self.ansatz_type == AnsatzType.VQE:
+            for _ in range(self.n_layers):
+                # Single-qubit rotations
+                for i in range(self.n_qubits):
+                    qml.Rot(*params[param_idx:param_idx + 3], wires=i)
+                    param_idx += 3
+                # Entangling layer
+                for i in range(self.n_qubits - 1):
+                    qml.CNOT(wires=[i, i + 1])
+                    
+        else:  # QNN ansatz
+            for _ in range(self.n_layers):
+                # Trainable single-qubit gates
+                for i in range(self.n_qubits):
+                    qml.Rot(*params[param_idx:param_idx + 3], wires=i)
+                    qml.RZ(params[param_idx + 3], wires=i)
+                    param_idx += 4
+                # Trainable two-qubit gates
+                for i in range(0, self.n_qubits - 1, 2):
+                    qml.CRZ(params[param_idx], wires=[i, i + 1])
+                    qml.CNOT(wires=[i, i + 1])
+
+    @qml.qnode
+    def circuit(self, params: np.ndarray, data: np.ndarray):
+        """
+        Complete quantum circuit combining encoding and ansatz.
+        
+        Args:
+            params: Circuit parameters
+            data: Input data
+            
+        Returns:
+            Measurement results
+        """
+        # Encode classical data
+        self._encode_data(data)
+        
+        # Apply ansatz
+        self._apply_ansatz(params)
+        
+        # Return expectations for all qubits
+        return [qml.expval(qml.PauliZ(i)) for i in range(self.n_qubits)]
+
+    def custom_cost(
+        self,
+        params: np.ndarray,
+        data: np.ndarray,
+        target: np.ndarray,
+        loss_fn: Optional[Callable] = None
+    ) -> float:
+        """
+        Customizable cost function.
+        
+        Args:
+            params: Circuit parameters
+            data: Input data
+            target: Target values
+            loss_fn: Custom loss function (defaults to MSE)
+            
+        Returns:
+            Cost value
+        """
+        predictions = self.circuit(params, data)
+        
+        if loss_fn is None:
+            return np.mean((np.array(predictions) - target) ** 2)
+        
+        return loss_fn(predictions, target)
+
+    def fit(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        n_epochs: int = 100,
+        batch_size: int = 32,
+        loss_fn: Optional[Callable] = None,
+        callback: Optional[Callable] = None
+    ) -> Dict:
+        """
+        Train the quantum circuit.
+        
+        Args:
+            X: Training data
+            y: Target values
+            n_epochs: Number of training epochs
+            batch_size: Batch size for training
+            loss_fn: Custom loss function
+            callback: Callback function for monitoring
+            
+        Returns:
+            Training history
+        """
+        opt = qml.GradientDescentOptimizer(stepsize=self.learning_rate)
+        history = {'loss': []}
+        
+        n_batches = len(X) // batch_size
+        
+        for epoch in range(n_epochs):
+            epoch_loss = 0
+            
+            # Mini-batch training
+            for i in range(n_batches):
+                batch_X = X[i * batch_size:(i + 1) * batch_size]
+                batch_y = y[i * batch_size:(i + 1) * batch_size]
+                
+                # Update parameters
+                self.params = opt.step(
+                    lambda p: self.custom_cost(p, batch_X, batch_y, loss_fn),
+                    self.params
+                )
+                
+                batch_loss = self.custom_cost(self.params, batch_X, batch_y, loss_fn)
+                epoch_loss += batch_loss
+                
+            avg_loss = epoch_loss / n_batches
+            history['loss'].append(avg_loss)
+            
+            if callback is not None:
+                callback(epoch, avg_loss)
+                
+            # Check convergence
+            if epoch > 0 and abs(history['loss'][-2] - avg_loss) < self.convergence_threshold:
+                logger.info(f"Converged at epoch {epoch}")
+                break
+                
+        return history
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        """Make predictions on new data"""
+        return np.array([self.circuit(self.params, x) for x in X])
+
+    def get_params(self, deep: bool = True) -> Dict:
+        """Get parameters for scikit-learn compatibility"""
+        return {
+            "n_qubits": self.n_qubits,
+            "ansatz_type": self.ansatz_type,
+            "encoding_type": self.encoding_type,
+            "n_layers": self.n_layers,
+            "learning_rate": self.learning_rate,
+            "convergence_threshold": self.convergence_threshold
+        }
+
+    def set_params(self, **parameters) -> 'QNLPCircuit':
+        """Set parameters for scikit-learn compatibility"""
+        for parameter, value in parameters.items():
+            setattr(self, parameter, value)
+        return self
+
+# Example usage with hyperparameter tuning
+if __name__ == "__main__":
+    # Sample data
+    X = np.random.randn(100, 4)
+    y = np.random.randint(0, 2, 100)
+    
+    # Define parameter grid for tuning
+    param_grid = {
+        'n_layers': [1, 2],
+        'learning_rate': [0.01, 0.001],
+        'convergence_threshold': [1e-5, 1e-6]
+    }
+    
+    # Initialize circuit
+    qnlp = QNLPCircuit()
+    
+    # Perform grid search
+    grid_search = GridSearchCV(
+        qnlp,
+        param_grid,
+        cv=3,
+        scoring='accuracy'
+    )
+    
+    # Fit with best parameters
+    grid_search.fit(X, y)
+    
+    logger.info(f"Best parameters: {grid_search.best_params_}")
+    logger.info(f"Best score: {grid_search.best_score_}")
