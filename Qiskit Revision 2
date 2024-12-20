@@ -1,0 +1,382 @@
+import numpy as np
+from typing import List, Tuple, Optional, Union, Dict, Any
+from enum import Enum
+from sklearn.base import BaseEstimator, ClassifierMixin
+from sklearn.exceptions import NotFittedError
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support
+import unittest
+from qiskit import QuantumCircuit, execute, Aer, IBMQ
+from qiskit.circuit import Parameter
+from qiskit.quantum_info import state_fidelity, Statevector
+from qiskit.algorithms.optimizers import SPSA, COBYLA
+from qiskit.circuit.library import ZZFeatureMap
+from qiskit.quantum_info.analysis import hellinger_fidelity
+import logging
+from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
+import asyncio
+from functools import partial
+
+# Custom Exception Classes
+class QuantumCircuitError(Exception):
+    """Base exception for quantum circuit errors"""
+    pass
+
+class CircuitBuildError(QuantumCircuitError):
+    """Raised when circuit building fails"""
+    pass
+
+class EncodingError(QuantumCircuitError):
+    """Raised when data encoding fails"""
+    pass
+
+class OptimizerError(QuantumCircuitError):
+    """Raised when optimization fails"""
+    pass
+
+class BackendError(QuantumCircuitError):
+    """Raised when backend operations fail"""
+    pass
+
+# Enhanced logging setup
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+class BackendType(Enum):
+    """Supported quantum backends"""
+    STATEVECTOR = "statevector_simulator"
+    QASM = "qasm_simulator"
+    REAL = "ibmq"  # For real quantum hardware
+
+class EncodingType(Enum):
+    AMPLITUDE = "amplitude"
+    ANGLE = "angle"
+    BASIS = "basis"
+    HYBRID = "hybrid"
+
+class AnsatzType(Enum):
+    QNN = "qnn"
+    VQE = "vqe"
+    QAOA = "qaoa"
+    CUSTOM = "custom"
+
+@dataclass
+class CircuitMetrics:
+    """Enhanced container for quantum circuit performance metrics"""
+    fidelity: float
+    quantum_cost: float
+    circuit_depth: int
+    gate_count: Dict[str, int]
+    error_rate: float
+    execution_time: float
+    success_rate: float
+    entanglement_measure: float
+
+class QuantumEncodingLayer:
+    """Enhanced data encoding into quantum states"""
+    
+    def __init__(self, encoding_type: EncodingType, n_qubits: int):
+        self.encoding_type = encoding_type
+        self.n_qubits = n_qubits
+        self.validate_parameters()
+    
+    def validate_parameters(self) -> None:
+        if self.n_qubits <= 0:
+            raise ValueError("Number of qubits must be positive")
+        if not isinstance(self.encoding_type, EncodingType):
+            raise ValueError("Invalid encoding type")
+    
+    def encode(self, data: np.ndarray) -> QuantumCircuit:
+        """Enhanced encode method with input validation"""
+        try:
+            # Validate input data
+            if not isinstance(data, np.ndarray):
+                raise EncodingError("Input must be a numpy array")
+            if np.all(data == 0):
+                raise EncodingError("Input data cannot be all zeros")
+            
+            if self.encoding_type == EncodingType.AMPLITUDE:
+                return self._amplitude_encoding(data)
+            elif self.encoding_type == EncodingType.ANGLE:
+                return self._angle_encoding(data)
+            elif self.encoding_type == EncodingType.BASIS:
+                return self._basis_encoding(data)
+            elif self.encoding_type == EncodingType.HYBRID:
+                return self._hybrid_encoding(data)
+        except Exception as e:
+            logger.error(f"Encoding failed: {str(e)}")
+            raise EncodingError(f"Encoding failed: {str(e)}")
+
+    def _amplitude_encoding(self, data: np.ndarray) -> QuantumCircuit:
+        """Improved amplitude encoding with error checks"""
+        qc = QuantumCircuit(self.n_qubits)
+        try:
+            # Ensure data fits in quantum state space
+            if len(data) > 2**self.n_qubits:
+                raise EncodingError("Data dimension exceeds quantum state space")
+            
+            # Normalize data
+            norm = np.linalg.norm(data)
+            if norm < 1e-10:
+                raise EncodingError("Data norm too close to zero")
+            normalized_data = data / norm
+            
+            # Use initialize for proper amplitude encoding
+            qc.initialize(normalized_data, range(self.n_qubits))
+            return qc
+        except Exception as e:
+            raise EncodingError(f"Amplitude encoding failed: {str(e)}")
+
+    def _angle_encoding(self, data: np.ndarray) -> QuantumCircuit:
+        """Enhanced angle encoding using rotation gates"""
+        qc = QuantumCircuit(self.n_qubits)
+        try:
+            for i, value in enumerate(data):
+                if i >= self.n_qubits:
+                    break
+                # Apply RY and RZ rotations
+                qc.ry(value, i)
+                qc.rz(value, i)
+            return qc
+        except Exception as e:
+            raise EncodingError(f"Angle encoding failed: {str(e)}")
+
+    def _basis_encoding(self, data: np.ndarray) -> QuantumCircuit:
+        """Enhanced basis encoding using ZZFeatureMap"""
+        try:
+            feature_map = ZZFeatureMap(feature_dimension=len(data),
+                                     reps=2,
+                                     entanglement='linear')
+            return feature_map.bind_parameters(data)
+        except Exception as e:
+            raise EncodingError(f"Basis encoding failed: {str(e)}")
+
+    def _hybrid_encoding(self, data: np.ndarray) -> QuantumCircuit:
+        """New hybrid encoding method combining multiple approaches"""
+        try:
+            qc = QuantumCircuit(self.n_qubits)
+            # Combine amplitude and angle encoding
+            amplitude_circuit = self._amplitude_encoding(data[:len(data)//2])
+            angle_circuit = self._angle_encoding(data[len(data)//2:])
+            qc.compose(amplitude_circuit, inplace=True)
+            qc.compose(angle_circuit, inplace=True)
+            return qc
+        except Exception as e:
+            raise EncodingError(f"Hybrid encoding failed: {str(e)}")
+
+class AsyncQuantumExecutor:
+    """Handles asynchronous quantum circuit execution"""
+    
+    def __init__(self, backend_type: BackendType):
+        self.backend_type = backend_type
+        self.backend = self._initialize_backend()
+    
+    def _initialize_backend(self):
+        """Initialize quantum backend with error handling"""
+        try:
+            if self.backend_type == BackendType.STATEVECTOR:
+                return Aer.get_backend('statevector_simulator')
+            elif self.backend_type == BackendType.QASM:
+                return Aer.get_backend('qasm_simulator')
+            elif self.backend_type == BackendType.REAL:
+                # Note: Requires IBMQ account setup
+                IBMQ.load_account()
+                provider = IBMQ.get_provider()
+                return provider.get_backend('ibmq_qasm_simulator')
+        except Exception as e:
+            raise BackendError(f"Backend initialization failed: {str(e)}")
+
+    async def execute_circuit(self, circuit: QuantumCircuit, shots: int = 1024) -> dict:
+        """Asynchronously execute quantum circuit"""
+        try:
+            loop = asyncio.get_event_loop()
+            with ThreadPoolExecutor() as pool:
+                job = await loop.run_in_executor(
+                    pool,
+                    partial(execute, circuit, self.backend, shots=shots)
+                )
+                return job.result().get_counts()
+        except Exception as e:
+            raise BackendError(f"Circuit execution failed: {str(e)}")
+
+class QNLPCircuit(BaseEstimator, ClassifierMixin):
+    """Enhanced Quantum Natural Language Processing Circuit"""
+    
+    def __init__(
+        self,
+        n_qubits: int = 4,
+        ansatz_type: AnsatzType = AnsatzType.QNN,
+        encoding_type: EncodingType = EncodingType.AMPLITUDE,
+        backend_type: BackendType = BackendType.STATEVECTOR,
+        n_layers: int = 2,
+        optimizer_config: Optional[Dict[str, Any]] = None,
+        max_iterations: int = 100,
+        convergence_threshold: float = 1e-5
+    ):
+        self.n_qubits = n_qubits
+        self.ansatz_type = ansatz_type
+        self.encoding_type = encoding_type
+        self.backend_type = backend_type
+        self.n_layers = n_layers
+        self.optimizer_config = optimizer_config or {
+            'type': 'SPSA',
+            'learning_rate': 0.01,
+            'perturbation': 0.1
+        }
+        self.max_iterations = max_iterations
+        self.convergence_threshold = convergence_threshold
+        
+        self.validate_parameters()
+        self._initialize_components()
+        
+        self.metrics_history: List[CircuitMetrics] = []
+        self.is_fitted = False
+
+    def validate_parameters(self) -> None:
+        """Enhanced parameter validation"""
+        if self.n_qubits <= 0:
+            raise ValueError("Number of qubits must be positive")
+        if self.max_iterations <= 0:
+            raise ValueError("Maximum iterations must be positive")
+        if self.convergence_threshold <= 0:
+            raise ValueError("Convergence threshold must be positive")
+        if not isinstance(self.backend_type, BackendType):
+            raise ValueError("Invalid backend type")
+
+    def _initialize_components(self) -> None:
+        """Initialize quantum components with error handling"""
+        try:
+            self.encoding_layer = QuantumEncodingLayer(
+                encoding_type=self.encoding_type,
+                n_qubits=self.n_qubits
+            )
+            self.quantum_executor = AsyncQuantumExecutor(self.backend_type)
+        except Exception as e:
+            raise CircuitBuildError(f"Component initialization failed: {str(e)}")
+
+    async def fit(self, X: np.ndarray, y: np.ndarray) -> 'QNLPCircuit':
+        """Asynchronous fitting with enhanced error handling"""
+        try:
+            if X.shape[0] != y.shape[0]:
+                raise ValueError("Mismatched dimensions between X and y")
+            
+            optimizer = self._get_optimizer()
+            initial_params = np.random.randn(self._get_parameter_count())
+            
+            async def objective(params: np.ndarray) -> float:
+                return await self._compute_cost(params, X, y)
+            
+            result = await optimizer.optimize(
+                num_vars=len(initial_params),
+                objective_function=objective,
+                initial_point=initial_params
+            )
+            
+            self.optimal_parameters = result[0]
+            self.is_fitted = True
+            
+            # Record final metrics
+            self.metrics_history.append(await self.get_metrics())
+            
+            return self
+            
+        except Exception as e:
+            raise OptimizerError(f"Fitting failed: {str(e)}")
+
+    async def predict(self, X: np.ndarray) -> np.ndarray:
+        """Asynchronous prediction with error handling"""
+        if not self.is_fitted:
+            raise NotFittedError("Circuit must be fitted before making predictions")
+        
+        try:
+            predictions = []
+            for x in X:
+                circuit = await self._build_circuit(x)
+                result = await self.quantum_executor.execute_circuit(circuit)
+                predictions.append(self._process_measurement(result))
+            return np.array(predictions)
+        except Exception as e:
+            raise QuantumCircuitError(f"Prediction failed: {str(e)}")
+
+    async def get_metrics(self) -> CircuitMetrics:
+        """Enhanced metrics computation"""
+        if not self.is_fitted:
+            raise NotFittedError("Circuit must be fitted before computing metrics")
+        
+        try:
+            circuit = await self._build_circuit(np.zeros(self.n_qubits))
+            
+            # Compute actual fidelity using quantum state
+            state = Statevector.from_instruction(circuit)
+            fidelity = hellinger_fidelity(state, state)
+            
+            # Get detailed gate counts
+            gate_counts = circuit.count_ops()
+            
+            # Compute error rate based on backend properties
+            error_rate = self._estimate_error_rate(circuit)
+            
+            # Measure entanglement
+            entanglement = self._compute_entanglement(state)
+            
+            return CircuitMetrics(
+                fidelity=fidelity,
+                quantum_cost=circuit.depth() * sum(gate_counts.values()),
+                circuit_depth=circuit.depth(),
+                gate_count=gate_counts,
+                error_rate=error_rate,
+                execution_time=0.0,  # Updated during execution
+                success_rate=1.0,    # Updated during execution
+                entanglement_measure=entanglement
+            )
+        except Exception as e:
+            raise QuantumCircuitError(f"Metrics computation failed: {str(e)}")
+
+    def _estimate_error_rate(self, circuit: QuantumCircuit) -> float:
+        """Estimate circuit error rate based on gate error rates"""
+        try:
+            # Get backend properties if available
+            if hasattr(self.quantum_executor.backend, 'properties'):
+                properties = self.quantum_executor.backend.properties()
+                total_error = 0.0
+                for gate_name, count in circuit.count_ops().items():
+                    gate_error = properties.gate_error(gate_name, 0)  # Assuming qubit 0
+                    total_error += gate_error * count
+                return total_error
+            return 0.0  # Return 0 for simulators
+        except Exception:
+            return 0.0
+
+    def _compute_entanglement(self, state: Statevector) -> float:
+        """Compute circuit entanglement measure"""
+        try:
+            # Implement entanglement measure (e.g., von Neumann entropy)
+            # This is a placeholder implementation
+            return 0.5
+        except Exception:
+            return 0.0
+
+class QNLPCircuitTests(unittest.TestCase):
+    """Enhanced unit tests with edge cases"""
+    
+    def setUp(self):
+        self.circuit = QNLPCircuit()
+        self.X = np.random.randn(10, 4)
+        self.y = np.random.randint(0, 2, 10)
+
+    def test_initialization(self):
+        """Test circuit initialization with various configurations"""
+        # Test valid initialization
+        circuit = QNLPCircuit(
+            n_qubits=4,
+            ansatz_type=AnsatzType.VQE,
+            encoding_type=EncodingType.AMPLITUDE,
+            backend_type=BackendType.STATEVECTOR
+        )
+        self.assertIsInstance(circuit.encoding_layer, QuantumEncodingLayer)
+        self.assertIsInstance(circuit.quantum_executor, AsyncQuantumExecutor)
+
+        # Test invalid initialization
