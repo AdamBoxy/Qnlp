@@ -1,0 +1,347 @@
+import numpy as np
+from typing import List, Tuple, Optional, Union, Dict
+from enum import Enum
+from sklearn.base import BaseEstimator, ClassifierMixin
+from sklearn.exceptions import NotFittedError
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support
+import unittest
+from qiskit import QuantumCircuit, execute, Aer
+from qiskit.circuit import Parameter
+from qiskit.quantum_info import state_fidelity
+from qiskit.algorithms.optimizers import SPSA, COBYLA
+import logging
+from dataclasses import dataclass
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class EncodingType(Enum):
+    AMPLITUDE = "amplitude"
+    ANGLE = "angle"
+    BASIS = "basis"
+
+class AnsatzType(Enum):
+    QNN = "qnn"
+    VQE = "vqe"
+    QAOA = "qaoa"
+
+@dataclass
+class CircuitMetrics:
+    """Container for quantum circuit performance metrics"""
+    fidelity: float
+    quantum_cost: float
+    circuit_depth: int
+    gate_count: int
+    error_rate: float
+
+class QuantumEncodingLayer:
+    """Handles data encoding into quantum states"""
+    
+    def __init__(self, encoding_type: EncodingType, n_qubits: int):
+        self.encoding_type = encoding_type
+        self.n_qubits = n_qubits
+        self.validate_parameters()
+    
+    def validate_parameters(self):
+        """Validate initialization parameters"""
+        if self.n_qubits <= 0:
+            raise ValueError("Number of qubits must be positive")
+        if not isinstance(self.encoding_type, EncodingType):
+            raise ValueError("Invalid encoding type")
+    
+    def encode(self, data: np.ndarray) -> QuantumCircuit:
+        """Encode classical data into quantum circuit"""
+        try:
+            if self.encoding_type == EncodingType.AMPLITUDE:
+                return self._amplitude_encoding(data)
+            elif self.encoding_type == EncodingType.ANGLE:
+                return self._angle_encoding(data)
+            elif self.encoding_type == EncodingType.BASIS:
+                return self._basis_encoding(data)
+        except Exception as e:
+            logger.error(f"Encoding failed: {str(e)}")
+            raise
+
+    def _amplitude_encoding(self, data: np.ndarray) -> QuantumCircuit:
+        # Implementation of amplitude encoding
+        qc = QuantumCircuit(self.n_qubits)
+        normalized_data = data / np.linalg.norm(data)
+        # Add amplitude encoding gates here
+        return qc
+
+    def _angle_encoding(self, data: np.ndarray) -> QuantumCircuit:
+        # Implementation of angle encoding
+        qc = QuantumCircuit(self.n_qubits)
+        # Add angle encoding gates here
+        return qc
+
+    def _basis_encoding(self, data: np.ndarray) -> QuantumCircuit:
+        # Implementation of basis encoding
+        qc = QuantumCircuit(self.n_qubits)
+        # Add basis encoding gates here
+        return qc
+
+class QuantumAnsatz:
+    """Implements various quantum ansatz circuits"""
+    
+    def __init__(self, ansatz_type: AnsatzType, n_qubits: int, n_layers: int):
+        self.ansatz_type = ansatz_type
+        self.n_qubits = n_qubits
+        self.n_layers = n_layers
+        self.parameters: List[Parameter] = []
+        self.validate_parameters()
+    
+    def validate_parameters(self):
+        """Validate initialization parameters"""
+        if self.n_qubits <= 0 or self.n_layers <= 0:
+            raise ValueError("Number of qubits and layers must be positive")
+        if not isinstance(self.ansatz_type, AnsatzType):
+            raise ValueError("Invalid ansatz type")
+    
+    def build_ansatz(self) -> QuantumCircuit:
+        """Build the quantum ansatz circuit"""
+        try:
+            if self.ansatz_type == AnsatzType.VQE:
+                return self._build_vqe_ansatz()
+            elif self.ansatz_type == AnsatzType.QAOA:
+                return self._build_qaoa_ansatz()
+            elif self.ansatz_type == AnsatzType.QNN:
+                return self._build_qnn_ansatz()
+        except Exception as e:
+            logger.error(f"Ansatz building failed: {str(e)}")
+            raise
+
+    def _build_vqe_ansatz(self) -> QuantumCircuit:
+        qc = QuantumCircuit(self.n_qubits)
+        # Implement VQE ansatz
+        return qc
+
+    def _build_qaoa_ansatz(self) -> QuantumCircuit:
+        qc = QuantumCircuit(self.n_qubits)
+        # Implement QAOA ansatz
+        return qc
+
+    def _build_qnn_ansatz(self) -> QuantumCircuit:
+        qc = QuantumCircuit(self.n_qubits)
+        # Implement QNN ansatz
+        return qc
+
+class QNLPCircuit(BaseEstimator, ClassifierMixin):
+    """Enhanced Quantum Natural Language Processing Circuit"""
+    
+    def __init__(
+        self,
+        n_qubits: int = 4,
+        ansatz_type: AnsatzType = AnsatzType.QNN,
+        encoding_type: EncodingType = EncodingType.AMPLITUDE,
+        n_layers: int = 2,
+        learning_rate: float = 0.01,
+        optimizer: str = 'SPSA',
+        max_iterations: int = 100,
+        convergence_threshold: float = 1e-5
+    ):
+        self.n_qubits = n_qubits
+        self.ansatz_type = ansatz_type
+        self.encoding_type = encoding_type
+        self.n_layers = n_layers
+        self.learning_rate = learning_rate
+        self.optimizer = optimizer
+        self.max_iterations = max_iterations
+        self.convergence_threshold = convergence_threshold
+        
+        self.encoding_layer = None
+        self.ansatz = None
+        self.backend = Aer.get_backend('statevector_simulator')
+        self.is_fitted = False
+        
+        self.validate_parameters()
+        self._initialize_components()
+
+    def validate_parameters(self):
+        """Validate initialization parameters"""
+        if self.n_qubits <= 0:
+            raise ValueError("Number of qubits must be positive")
+        if self.learning_rate <= 0:
+            raise ValueError("Learning rate must be positive")
+        if self.max_iterations <= 0:
+            raise ValueError("Maximum iterations must be positive")
+        if self.convergence_threshold <= 0:
+            raise ValueError("Convergence threshold must be positive")
+
+    def _initialize_components(self):
+        """Initialize quantum circuit components"""
+        try:
+            self.encoding_layer = QuantumEncodingLayer(
+                encoding_type=self.encoding_type,
+                n_qubits=self.n_qubits
+            )
+            self.ansatz = QuantumAnsatz(
+                ansatz_type=self.ansatz_type,
+                n_qubits=self.n_qubits,
+                n_layers=self.n_layers
+            )
+        except Exception as e:
+            logger.error(f"Component initialization failed: {str(e)}")
+            raise
+
+    def _get_optimizer(self):
+        """Get the quantum optimizer"""
+        if self.optimizer == 'SPSA':
+            return SPSA(maxiter=self.max_iterations)
+        elif self.optimizer == 'COBYLA':
+            return COBYLA(maxiter=self.max_iterations)
+        else:
+            raise ValueError(f"Unsupported optimizer: {self.optimizer}")
+
+    def _compute_cost(self, parameters: np.ndarray, X: np.ndarray, y: np.ndarray) -> float:
+        """Compute the cost function"""
+        try:
+            predictions = self._get_predictions(X, parameters)
+            cost = np.mean((predictions - y) ** 2)
+            return cost
+        except Exception as e:
+            logger.error(f"Cost computation failed: {str(e)}")
+            raise
+
+    def _get_predictions(self, X: np.ndarray, parameters: np.ndarray) -> np.ndarray:
+        """Get predictions from quantum circuit"""
+        try:
+            circuit = self._build_circuit(X)
+            bound_circuit = circuit.bind_parameters(parameters)
+            result = execute(bound_circuit, self.backend).result()
+            # Process quantum measurements to predictions
+            return np.array([0])  # Placeholder
+        except Exception as e:
+            logger.error(f"Prediction generation failed: {str(e)}")
+            raise
+
+    def _build_circuit(self, X: np.ndarray) -> QuantumCircuit:
+        """Build the complete quantum circuit"""
+        try:
+            encoding_circuit = self.encoding_layer.encode(X)
+            ansatz_circuit = self.ansatz.build_ansatz()
+            complete_circuit = encoding_circuit.compose(ansatz_circuit)
+            return complete_circuit
+        except Exception as e:
+            logger.error(f"Circuit building failed: {str(e)}")
+            raise
+
+    def fit(self, X: np.ndarray, y: np.ndarray) -> 'QNLPCircuit':
+        """Fit the quantum circuit to the data"""
+        try:
+            optimizer = self._get_optimizer()
+            initial_params = np.random.randn(len(self.ansatz.parameters))
+            
+            def objective(params):
+                return self._compute_cost(params, X, y)
+            
+            result = optimizer.optimize(
+                num_vars=len(initial_params),
+                objective_function=objective,
+                initial_point=initial_params
+            )
+            
+            self.optimal_parameters = result[0]
+            self.is_fitted = True
+            return self
+            
+        except Exception as e:
+            logger.error(f"Fitting failed: {str(e)}")
+            raise
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        """Make predictions using the quantum circuit"""
+        if not self.is_fitted:
+            raise NotFittedError("Circuit must be fitted before making predictions")
+        
+        try:
+            return self._get_predictions(X, self.optimal_parameters)
+        except Exception as e:
+            logger.error(f"Prediction failed: {str(e)}")
+            raise
+
+    def get_metrics(self) -> CircuitMetrics:
+        """Get quantum-specific performance metrics"""
+        if not self.is_fitted:
+            raise NotFittedError("Circuit must be fitted before computing metrics")
+        
+        try:
+            circuit = self._build_circuit(np.array([0]))  # Placeholder input
+            return CircuitMetrics(
+                fidelity=state_fidelity(circuit, circuit),  # Placeholder
+                quantum_cost=circuit.depth(),
+                circuit_depth=circuit.depth(),
+                gate_count=sum(circuit.count_ops().values()),
+                error_rate=0.0  # Placeholder
+            )
+        except Exception as e:
+            logger.error(f"Metrics computation failed: {str(e)}")
+            raise
+
+class QNLPCircuitTests(unittest.TestCase):
+    """Unit tests for the QNLPCircuit"""
+    
+    def setUp(self):
+        self.circuit = QNLPCircuit()
+        self.X = np.random.randn(10, 4)
+        self.y = np.random.randint(0, 2, 10)
+
+    def test_initialization(self):
+        """Test circuit initialization"""
+        self.assertIsInstance(self.circuit.encoding_layer, QuantumEncodingLayer)
+        self.assertIsInstance(self.circuit.ansatz, QuantumAnsatz)
+
+    def test_parameter_validation(self):
+        """Test parameter validation"""
+        with self.assertRaises(ValueError):
+            QNLPCircuit(n_qubits=-1)
+
+    def test_fit_predict(self):
+        """Test fitting and prediction"""
+        self.circuit.fit(self.X, self.y)
+        predictions = self.circuit.predict(self.X)
+        self.assertEqual(len(predictions), len(self.y))
+
+    def test_metrics(self):
+        """Test metrics computation"""
+        self.circuit.fit(self.X, self.y)
+        metrics = self.circuit.get_metrics()
+        self.assertIsInstance(metrics, CircuitMetrics)
+
+if __name__ == "__main__":
+    # Run unit tests
+    unittest.main(argv=['first-arg-is-ignored'], exit=False)
+    
+    # Example usage
+    X = np.random.randn(100, 4)
+    y = np.random.randint(0, 2, 100)
+    
+    circuit = QNLPCircuit(
+        n_qubits=4,
+        ansatz_type=AnsatzType.VQE,
+        encoding_type=EncodingType.AMPLITUDE
+    )
+    
+    try:
+        # Fit and predict
+        circuit.fit(X, y)
+        predictions = circuit.predict(X)
+        
+        # Get metrics
+        metrics = circuit.get_metrics()
+        logger.info(f"Circuit metrics: {metrics}")
+        
+        # Calculate classical metrics
+        accuracy = accuracy_score(y, predictions)
+        precision, recall, f1, _ = precision_recall_fscore_support(
+            y, predictions, average='binary'
+        )
+        
+        logger.info(f"Accuracy: {accuracy}")
+        logger.info(f"Precision: {precision}")
+        logger.info(f"Recall: {recall}")
+        logger.info(f"F1 Score: {f1}")
+        
+    except Exception as e:
+        logger.error(f"Error in example usage: {str(e)}")
