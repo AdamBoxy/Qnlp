@@ -1,0 +1,403 @@
+from enum import Enum
+import numpy as np
+import logging
+import time
+from dataclasses import dataclass
+from typing import Optional, Dict, Any
+from sklearn.base import BaseEstimator, ClassifierMixin
+
+# --------------------------------------------------
+# Enums and Custom Exceptions
+# --------------------------------------------------
+
+class FrameworkType(Enum):
+    PENNYLANE = "pennylane"
+    QISKIT = "qiskit"
+
+class EncodingType(Enum):
+    AMPLITUDE = "amplitude"
+    ANGLE = "angle"
+    BASIS = "basis"
+    HYBRID = "hybrid"
+
+class AnsatzType(Enum):
+    SIMPLE = "simple"
+    QNN = "qnn"
+    VQE = "vqe"
+    QAOA = "qaoa"
+    CUSTOM = "custom"
+
+class QNLPError(Exception):
+    """Base exception for QNLP issues."""
+    pass
+
+class EncodingError(QNLPError):
+    pass
+
+class CircuitBuildError(QNLPError):
+    pass
+
+class OptimizationError(QNLPError):
+    pass
+
+class BackendError(QNLPError):
+    pass
+
+# --------------------------------------------------
+# Metrics Dataclass
+# --------------------------------------------------
+
+@dataclass
+class CircuitMetrics:
+    fidelity: float
+    quantum_cost: float
+    circuit_depth: int
+    gate_count: Dict[str, int]
+    error_rate: float
+    execution_time: float
+    success_rate: float
+    entanglement_measure: float
+
+# --------------------------------------------------
+# Logging Setup
+# --------------------------------------------------
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# --------------------------------------------------
+# Unified QNLPCircuit Class
+# --------------------------------------------------
+
+class UnifiedQNLPCircuit(BaseEstimator, ClassifierMixin):
+    def __init__(
+        self,
+        n_qubits: int = 4,
+        framework: FrameworkType = FrameworkType.PENNYLANE,
+        device: Optional[str] = None,  # For PennyLane: device string; for Qiskit: backend name
+        ansatz_type: AnsatzType = AnsatzType.QNN,
+        encoding_type: EncodingType = EncodingType.AMPLITUDE,
+        n_layers: int = 2,
+        learning_rate: float = 0.01,
+        optimizer_config: Optional[Dict[str, Any]] = None,
+        max_iterations: int = 100,
+        convergence_threshold: float = 1e-5,
+        shots: int = 1024
+    ):
+        self.n_qubits = n_qubits
+        self.framework = framework
+        self.device_str = device
+        self.ansatz_type = ansatz_type
+        self.encoding_type = encoding_type
+        self.n_layers = n_layers
+        self.learning_rate = learning_rate
+        self.optimizer_config = optimizer_config or {}
+        self.max_iterations = max_iterations
+        self.convergence_threshold = convergence_threshold
+        self.shots = shots
+
+        self.is_fitted = False
+        self.optimal_parameters = None
+
+        self._init_backend()
+        self._init_parameters()
+
+    # ---------------------------
+    # Backend Initialization
+    # ---------------------------
+    def _init_backend(self):
+        if self.framework == FrameworkType.PENNYLANE:
+            import pennylane as qml
+            dev_name = self.device_str or "default.qubit"
+            self.dev = qml.device(dev_name, wires=self.n_qubits, shots=self.shots)
+        elif self.framework == FrameworkType.QISKIT:
+            from qiskit import Aer, IBMQ
+            self.backend_name = self.device_str or "statevector_simulator"
+            try:
+                if self.backend_name.lower() == "ibmq":
+                    IBMQ.load_account()
+                    provider = IBMQ.get_provider()
+                    self.backend = provider.get_backend('ibmq_qasm_simulator')
+                else:
+                    self.backend = Aer.get_backend(self.backend_name)
+            except Exception as e:
+                raise BackendError(f"Qiskit backend initialization failed: {str(e)}")
+        else:
+            raise BackendError("Unsupported framework type")
+
+    # ---------------------------
+    # Parameter Initialization
+    # ---------------------------
+    def _init_parameters(self):
+        # Determine number of parameters based on ansatz type
+        if self.ansatz_type == AnsatzType.SIMPLE:
+            self.n_params = self.n_qubits * 2
+        elif self.ansatz_type == AnsatzType.VQE:
+            self.n_params = self.n_qubits * self.n_layers * 3
+        elif self.ansatz_type == AnsatzType.QAOA:
+            self.n_params = self.n_qubits * self.n_layers * 2
+        else:  # QNN or CUSTOM
+            self.n_params = self.n_qubits * self.n_layers * 4
+        self.params = np.random.randn(self.n_params)
+
+    # --------------------------------------------------
+    # PennyLane Implementation (Differentiable & Integrated)
+    # --------------------------------------------------
+    def _pennylane_encoding(self, data):
+        import pennylane as qml
+        if self.encoding_type == EncodingType.ANGLE:
+            for i in range(min(len(data), self.n_qubits)):
+                qml.RY(data[i], wires=i)
+        elif self.encoding_type == EncodingType.AMPLITUDE:
+            norm = np.linalg.norm(data)
+            if norm < 1e-10:
+                raise EncodingError("Data norm too close to zero for amplitude encoding")
+            qml.QubitStateVector(data / norm, wires=range(self.n_qubits))
+        elif self.encoding_type == EncodingType.BASIS:
+            for i in range(min(len(data), self.n_qubits)):
+                if data[i] > 0.5:
+                    qml.PauliX(wires=i)
+        elif self.encoding_type == EncodingType.HYBRID:
+            half = len(data) // 2
+            self._pennylane_encoding(data[:half])
+            self._pennylane_encoding(data[half:])
+        else:
+            raise EncodingError("Unsupported encoding type")
+
+    def _pennylane_ansatz(self, params):
+        import pennylane as qml
+        param_idx = 0
+        if self.ansatz_type == AnsatzType.SIMPLE:
+            for i in range(self.n_qubits):
+                qml.RX(params[param_idx], wires=i)
+                qml.RY(params[param_idx+1], wires=i)
+                param_idx += 2
+        elif self.ansatz_type == AnsatzType.VQE:
+            for _ in range(self.n_layers):
+                for i in range(self.n_qubits):
+                    qml.Rot(params[param_idx], params[param_idx+1], params[param_idx+2], wires=i)
+                    param_idx += 3
+                for i in range(self.n_qubits - 1):
+                    qml.CNOT(wires=[i, i+1])
+        else:  # QNN or CUSTOM
+            for _ in range(self.n_layers):
+                for i in range(self.n_qubits):
+                    qml.Rot(params[param_idx], params[param_idx+1], params[param_idx+2], wires=i)
+                    qml.RZ(params[param_idx+3], wires=i)
+                    param_idx += 4
+                for i in range(0, self.n_qubits - 1, 2):
+                    qml.CRX(params[param_idx] if param_idx < len(params) else 0.0, wires=[i, i+1])
+                    param_idx += 1
+
+    def _pennylane_circuit(self, params, data):
+        import pennylane as qml
+
+        @qml.qnode(self.dev)
+        def circuit_fn(params, data):
+            self._pennylane_encoding(data)
+            self._pennylane_ansatz(params)
+            return [qml.expval(qml.PauliZ(i)) for i in range(self.n_qubits)]
+        return circuit_fn(params, data)
+
+    # --------------------------------------------------
+    # Qiskit Implementation (Hardware Oriented & Asynchronous)
+    # --------------------------------------------------
+    def _qiskit_encoding(self, data):
+        from qiskit import QuantumCircuit
+        qc = QuantumCircuit(self.n_qubits)
+        if self.encoding_type == EncodingType.ANGLE:
+            for i in range(min(len(data), self.n_qubits)):
+                qc.ry(data[i], i)
+        elif self.encoding_type == EncodingType.AMPLITUDE:
+            norm = np.linalg.norm(data)
+            if norm < 1e-10:
+                raise EncodingError("Data norm too close to zero for amplitude encoding")
+            qc.initialize(data / norm, list(range(self.n_qubits)))
+        elif self.encoding_type == EncodingType.BASIS:
+            for i in range(min(len(data), self.n_qubits)):
+                if data[i] > 0.5:
+                    qc.x(i)
+        elif self.encoding_type == EncodingType.HYBRID:
+            half = len(data) // 2
+            qc1 = self._qiskit_encoding(data[:half])
+            qc2 = self._qiskit_encoding(data[half:])
+            qc.compose(qc1, inplace=True)
+            qc.compose(qc2, inplace=True)
+        else:
+            raise EncodingError("Unsupported encoding type")
+        return qc
+
+    def _qiskit_ansatz(self, qc, params):
+        param_idx = 0
+        if self.ansatz_type == AnsatzType.SIMPLE:
+            for i in range(self.n_qubits):
+                qc.rx(params[param_idx], i)
+                qc.ry(params[param_idx+1], i)
+                param_idx += 2
+        elif self.ansatz_type == AnsatzType.VQE:
+            for _ in range(self.n_layers):
+                for i in range(self.n_qubits):
+                    qc.u(params[param_idx], params[param_idx+1], params[param_idx+2], i)
+                    param_idx += 3
+                for i in range(self.n_qubits - 1):
+                    qc.cx(i, i+1)
+        else:  # QNN or CUSTOM
+            for _ in range(self.n_layers):
+                for i in range(self.n_qubits):
+                    qc.u(params[param_idx], params[param_idx+1], params[param_idx+2], i)
+                    qc.rz(params[param_idx+3], i)
+                    param_idx += 4
+                for i in range(0, self.n_qubits - 1, 2):
+                    qc.crz(params[param_idx] if param_idx < len(params) else 0.0, i, i+1)
+                    param_idx += 1
+        return qc
+
+    def _qiskit_circuit(self, params, data):
+        from qiskit import QuantumCircuit
+        qc = self._qiskit_encoding(data)
+        qc = self._qiskit_ansatz(qc, params)
+        return qc
+
+    def _qiskit_execute(self, qc):
+        from qiskit import execute
+        job = execute(qc, backend=self.backend, shots=self.shots)
+        result = job.result()
+        counts = result.get_counts(qc)
+        # Simple post-processing to compute expectation values of Pauli Z for each qubit (placeholder)
+        expvals = []
+        for i in range(self.n_qubits):
+            z_sum = 0
+            total = 0
+            for bitstring, count in counts.items():
+                total += count
+                bit = int(bitstring[::-1][i])
+                z_sum += (1 - 2 * bit) * count
+            expvals.append(z_sum / total if total > 0 else 0)
+        return np.array(expvals)
+
+    # --------------------------------------------------
+    # Public API: predict, cost, fit, get_metrics
+    # --------------------------------------------------
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        predictions = []
+        for x in X:
+            if self.framework == FrameworkType.PENNYLANE:
+                pred = self._pennylane_circuit(self.params, x)
+            elif self.framework == FrameworkType.QISKIT:
+                qc = self._qiskit_circuit(self.params, x)
+                pred = self._qiskit_execute(qc)
+            predictions.append(pred)
+        return np.array(predictions)
+
+    def cost(self, params, X, y, loss_fn=None):
+        total_cost = 0
+        for i in range(len(X)):
+            if self.framework == FrameworkType.PENNYLANE:
+                pred = self._pennylane_circuit(params, X[i])
+            elif self.framework == FrameworkType.QISKIT:
+                qc = self._qiskit_circuit(params, X[i])
+                pred = self._qiskit_execute(qc)
+            if loss_fn:
+                total_cost += loss_fn(pred, y[i])
+            else:
+                total_cost += np.mean((np.array(pred) - y[i]) ** 2)
+        return total_cost / len(X)
+
+    def fit(self, X: np.ndarray, y: np.ndarray):
+        if self.framework == FrameworkType.PENNYLANE:
+            import pennylane as qml
+            opt = qml.GradientDescentOptimizer(stepsize=self.learning_rate)
+            params = self.params
+            for it in range(self.max_iterations):
+                cost_val = self.cost(params, X, y)
+                new_params = opt.step(lambda p: self.cost(p, X, y), params)
+                new_cost = self.cost(new_params, X, y)
+                if abs(cost_val - new_cost) < self.convergence_threshold:
+                    logger.info(f"Converged at iteration {it}")
+                    params = new_params
+                    break
+                params = new_params
+            self.optimal_parameters = params
+            self.params = params
+            self.is_fitted = True
+
+        elif self.framework == FrameworkType.QISKIT:
+            # Use SPSA optimizer from Qiskit as a placeholder.
+            from qiskit.algorithms.optimizers import SPSA
+            optimizer = SPSA(maxiter=self.max_iterations)
+            def objective(p):
+                return self.cost(p, X, y)
+            opt_result = optimizer.optimize(num_vars=self.n_params, objective_function=objective, initial_point=self.params)
+            self.optimal_parameters = opt_result[0]
+            self.params = self.optimal_parameters
+            self.is_fitted = True
+
+        return self
+
+    def get_metrics(self) -> CircuitMetrics:
+        if not self.is_fitted:
+            raise QNLPError("Circuit must be fitted before computing metrics")
+        start_time = time.time()
+        if self.framework == FrameworkType.PENNYLANE:
+            dummy_output = self._pennylane_circuit(self.params, np.zeros(self.n_qubits))
+        elif self.framework == FrameworkType.QISKIT:
+            qc = self._qiskit_circuit(self.params, np.zeros(self.n_qubits))
+            dummy_output = self._qiskit_execute(qc)
+        exec_time = time.time() - start_time
+        # Placeholder metrics (extend with actual backend properties and entanglement measures as needed)
+        metrics = CircuitMetrics(
+            fidelity=1.0,
+            quantum_cost=100,
+            circuit_depth=self.n_layers,
+            gate_count={"total": self.n_params},
+            error_rate=0.0,
+            execution_time=exec_time,
+            success_rate=1.0,
+            entanglement_measure=0.5
+        )
+        return metrics
+
+    # --------------------------------------------------
+    # scikit-learn Compatibility
+    # --------------------------------------------------
+    def get_params(self, deep=True):
+        return {
+            "n_qubits": self.n_qubits,
+            "framework": self.framework,
+            "device": self.device_str,
+            "ansatz_type": self.ansatz_type,
+            "encoding_type": self.encoding_type,
+            "n_layers": self.n_layers,
+            "learning_rate": self.learning_rate,
+            "max_iterations": self.max_iterations,
+            "convergence_threshold": self.convergence_threshold,
+            "shots": self.shots
+        }
+
+    def set_params(self, **parameters):
+        for parameter, value in parameters.items():
+            setattr(self, parameter, value)
+        self._init_parameters()
+        self._init_backend()
+        return self
+
+# --------------------------------------------------
+# Example Usage and Simple Unit Test
+# --------------------------------------------------
+if __name__ == "__main__":
+    # Generate some synthetic data (for demonstration, regression-like targets)
+    X = np.random.randn(10, 4)
+    y = np.random.randn(10, 4)
+    
+    # Initialize the circuit using PennyLane (set framework=FrameworkType.QISKIT to try Qiskit)
+    qnlp = UnifiedQNLPCircuit(n_qubits=4, framework=FrameworkType.PENNYLANE)
+    
+    # Fit the circuit on data
+    qnlp.fit(X, y)
+    
+    # Generate predictions and compute metrics
+    predictions = qnlp.predict(X)
+    metrics = qnlp.get_metrics()
+    
+    logger.info(f"Predictions:\n{predictions}")
+    logger.info(f"Metrics:\n{metrics}")
